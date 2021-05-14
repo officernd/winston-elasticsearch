@@ -1,199 +1,179 @@
 'use strict';
 
-const util = require('util');
-const Promise = require('promise');
-const stream = require('stream');
 const winston = require('winston');
-const moment = require('moment');
-const _ = require('lodash');
-const retry = require('retry');
-const elasticsearch = require('elasticsearch');
-
+const Transport = require('winston-transport');
+const dayjs = require('dayjs');
+const defaults = require('lodash.defaults');
+const omit = require('lodash.omit');
+const { Client } = require('@elastic/elasticsearch');
 const defaultTransformer = require('./transformer');
 const BulkWriter = require('./bulk_writer');
 
-/**
- * Constructor
- */
-const Elasticsearch = function Elasticsearch(options) {
-  this.options = options || {};
-  if (!options.timestamp) {
-    this.options.timestamp = function timestamp() { return new Date().toISOString(); };
-  }
-  // Enforce context
-  if (!(this instanceof Elasticsearch)) {
-    return new Elasticsearch(options);
-  }
+class ElasticsearchTransport extends Transport {
+  constructor(opts) {
+    super(opts);
+    this.name = 'elasticsearch';
+    this.handleExceptions = opts.handleExceptions || false;
+    this.handleRejections = opts.handleRejections || false;
+    this.exitOnError = false;
+    this.source = null;
 
-  // Set defaults
-  const defaults = {
-    level: 'info',
-    index: null,
-    indexPrefix: 'logs',
-    indexSuffixPattern: 'YYYY.MM.DD',
-    messageType: 'log',
-    transformer: defaultTransformer,
-    ensureMappingTemplate: true,
-    flushInterval: 2000,
-    waitForActiveShards: 1,
-    handleExceptions: false
-  };
-  _.defaults(options, defaults);
-  winston.Transport.call(this, options);
-
-  // Use given client or create one
-  if (options.client) {
-    this.client = options.client;
-  } else {
-    // As we don't want to spam stdout, create a null stream
-    // to eat any log output of the ES client
-    const NullStream = function NullStream() {
-      stream.Writable.call(this);
-    };
-    util.inherits(NullStream, stream.Writable);
-    // eslint-disable-next-line no-underscore-dangle
-    NullStream.prototype._write = function _write(chunk, encoding, next) {
-      next();
-    };
-
-    const defaultClientOpts = {
-      clientOpts: {
-        log: [
-          {
-            type: 'stream',
-            level: 'error',
-            stream: new NullStream()
-          }
-        ]
-      }
-    };
-    _.defaults(options, defaultClientOpts);
-
-    // Create a new ES client
-    // http://localhost:9200 is the default of the client already
-    this.client = new elasticsearch.Client(this.options.clientOpts);
-  }
-
-  this.bulkWriter = new BulkWriter(this.client,
-      options.flushInterval, options.waitForActiveShards);
-  this.bulkWriter.start();
-
-  // Conduct initial connection check (sets connection state for further use)
-  this.checkEsConnection().then((connectionOk) => {});
-
-  return this;
-};
-
-util.inherits(Elasticsearch, winston.Transport);
-
-Elasticsearch.prototype.name = 'elasticsearch';
-
-/**
- * log() method
- */
-Elasticsearch.prototype.log = function log(level, message, meta, callback) {
-  const logData = {
-    message,
-    level,
-    meta,
-    timestamp: this.options.timestamp()
-  };
-  const entry = this.options.transformer(logData);
-
-  this.bulkWriter.append(
-    this.getIndexName(this.options),
-    this.options.messageType,
-    entry
-  );
-
-  callback(); // write is deferred, so no room for errors here :)
-};
-
-Elasticsearch.prototype.getIndexName = function getIndexName(options) {
-  let indexName = options.index;
-  if (indexName === null) {
-    const now = moment();
-    const dateString = now.format(options.indexSuffixPattern);
-    indexName = options.indexPrefix + '-' + dateString;
-  }
-  return indexName;
-};
-
-Elasticsearch.prototype.checkEsConnection = function checkEsConnection() {
-  const thiz = this;
-  thiz.esConnection = false;
-
-  const operation = retry.operation({
-    retries: 3,
-    factor: 3,
-    minTimeout: 1 * 1000,
-    maxTimeout: 60 * 1000,
-    randomize: false
-  });
-
-  return new Promise((fulfill, reject) => {
-    operation.attempt((currentAttempt) => {
-      thiz.client.ping().then(
-        (res) => {
-          thiz.esConnection = true;
-          // Ensure mapping template is existing if desired
-          if (thiz.options.ensureMappingTemplate) {
-            thiz.ensureMappingTemplate(fulfill, reject);
-          } else {
-            fulfill(true);
-          }
-        },
-        (err) => {
-          if (operation.retry(err)) {
-            return;
-          }
-          thiz.esConnection = false;
-          thiz.emit('error', err);
-          reject(false);
-        });
+    this.on('pipe', (source) => {
+      this.source = source;
     });
-  });
-};
 
-Elasticsearch.prototype.search = function search(q) {
-  const index = this.getIndexName(this.options);
-  const query = {
-    index,
-    q
-  };
-  return this.client.search(query);
-};
-
-Elasticsearch.prototype.ensureMappingTemplate = function ensureMappingTemplate(fulfill, reject) {
-  const thiz = this;
-  let mappingTemplate = thiz.options.mappingTemplate;
-  if (mappingTemplate === null || typeof mappingTemplate === 'undefined') {
-    // eslint-disable-next-line import/no-unresolved, import/no-extraneous-dependencies
-    mappingTemplate = require('index-template-mapping.json');
-  }
-  const tmplCheckMessage = {
-    name: 'template_' + thiz.options.indexPrefix
-  };
-  thiz.client.indices.getTemplate(tmplCheckMessage).then(
-    (res) => {
-      fulfill(res);
-    },
-    (res) => {
-      if (res.status && res.status === 404) {
-        const tmplMessage = {
-          name: 'template_' + thiz.options.indexPrefix,
-          create: true,
-          body: mappingTemplate
-        };
-        thiz.client.indices.putTemplate(tmplMessage).then(
-        (res1) => {
-          fulfill(res1);
-        },
-        (err1) => {
-          reject(err1);
-        });
-      }
+    this.on('error', (err) => {
+      this.source.pipe(this); // re-pipes readable
     });
-};
 
-module.exports = winston.transports.Elasticsearch = Elasticsearch;
+    this.opts = opts || {};
+
+    // Set defaults
+    defaults(opts, {
+      level: 'info',
+      index: opts.dataStream ? 'logs-app-default' : null,
+      indexPrefix: 'logs',
+      indexSuffixPattern: 'YYYY.MM.DD',
+      transformer: defaultTransformer,
+      useTransformer: true,
+      ensureIndexTemplate: true,
+      flushInterval: 2000,
+      waitForActiveShards: 1,
+      handleExceptions: false,
+      exitOnError: false,
+      pipeline: null,
+      bufferLimit: null,
+      buffering: true,
+      healthCheckTimeout: '30s',
+      healthCheckWaitForStatus: 'yellow',
+      healthCheckWaitForNodes: '>=1',
+      dataStream: false,
+    });
+
+    // Use given client or create one
+    if (opts.client) {
+      this.client = opts.client;
+    } else {
+      defaults(opts, {
+        clientOpts: {
+          log: [
+            {
+              type: 'console',
+              level: 'error',
+            }
+          ]
+        }
+      });
+
+      // Create a new ES client
+      // http://localhost:9200 is the default of the client already
+      const copts = { ...this.opts.clientOpts };
+      this.client = new Client(copts);
+    }
+
+    const bulkWriterOpts = {
+      index: opts.index,
+      interval: opts.flushInterval,
+      waitForActiveShards: opts.waitForActiveShards,
+      pipeline: opts.pipeline,
+      ensureIndexTemplate: opts.ensureIndexTemplate,
+      indexTemplate: opts.indexTemplate,
+      indexPrefix: opts.indexPrefix,
+      buffering: opts.buffering,
+      bufferLimit: opts.buffering ? opts.bufferLimit : 0,
+      healthCheckTimeout: opts.healthCheckTimeout,
+      healthCheckWaitForStatus: opts.healthCheckWaitForStatus,
+      healthCheckWaitForNodes: opts.healthCheckWaitForNodes,
+      dataStream: opts.dataStream,
+      retryLimit: opts.retryLimit
+    };
+
+    this.bulkWriter = new BulkWriter(this, this.client, bulkWriterOpts);
+    this.bulkWriter.start();
+  }
+
+  async flush() {
+    await this.bulkWriter.flush();
+  }
+
+  // end() will be called from here: https://github.com/winstonjs/winston/blob/master/lib/winston/logger.js#L328
+  end(chunk, encoding, callback) {
+    this.bulkWriter.schedule = () => { };
+    this.bulkWriter.flush().then(() => {
+      setImmediate(() => {
+        super.end(chunk, encoding, callback); // this emits finish event from stream
+      });
+    });
+  }
+
+  log(info, callback) {
+    const { level, message, timestamp } = info;
+    const meta = Object.assign({}, omit(info, ['level', 'message']));
+    setImmediate(() => {
+      this.emit('logged', level);
+    });
+
+    const logData = {
+      message,
+      level,
+      timestamp,
+      meta,
+    };
+
+    const entry = this.opts.useTransformer
+      ? this.opts.transformer(logData)
+      : info;
+
+    let index = this.opts.dataStream
+      ? this.opts.index
+      : this.getIndexName(this.opts);
+
+    if (this.opts.source) {
+      entry.source = this.opts.source;
+    }
+
+    if (entry.indexInterfix !== undefined) {
+      index = this.opts.dataStream
+        ? this.getDataStreamName(this.opts, entry.indexInterfix)
+        : this.getIndexName(this.opts, entry.indexInterfix);
+      delete entry.indexInterfix;
+    }
+
+    if (this.opts.apm) {
+      const apm = this.opts.apm.currentTraceIds;
+      if (apm['transaction.id']) entry.transaction = { id: apm['transaction.id'], ...entry.transaction };
+      if (apm['trace.id']) entry.trace = { id: apm['trace.id'], ...entry.trace };
+      if (apm['span.id']) entry.span = { id: apm['span.id'], ...entry.span };
+    }
+
+    this.bulkWriter.append(index, entry);
+
+    callback();
+  }
+
+  getIndexName(opts, indexInterfix) {
+    this.test = 'test';
+    let indexName = opts.index;
+    if (indexName === null) {
+      // eslint-disable-next-line prefer-destructuring
+      let indexPrefix = opts.indexPrefix;
+      if (typeof indexPrefix === 'function') {
+        // eslint-disable-next-line prefer-destructuring
+        indexPrefix = opts.indexPrefix();
+      }
+      const now = dayjs();
+      const dateString = now.format(opts.indexSuffixPattern);
+      indexName = indexPrefix
+        + (indexInterfix !== undefined ? '-' + indexInterfix : '')
+        + '-'
+        + dateString;
+    }
+    return indexName;
+  }
+}
+
+winston.transports.Elasticsearch = ElasticsearchTransport;
+
+module.exports = {
+  ElasticsearchTransport
+};
