@@ -1,6 +1,6 @@
 {
   "name": "winston-elasticsearch",
-  "version": "0.5.0",
+  "version": "0.15.4",
   "description": "An Elasticsearch transport for winston",
   "main": "index",
   "authors": [
@@ -11,7 +11,7 @@
     {
       "name": "Thomas Hoppe",
       "url": "https://github.com/vanthome",
-      "email": "thomas.hoppe@n-fuse.de"
+      "email": "thomas.hoppe@n-fuse.co"
     }
   ],
   "contributors": [
@@ -32,36 +32,38 @@
     "transport",
     "logstash"
   ],
+  "optionalDependencies": {
+    "elastic-apm-node": "^3.9.0"
+  },
   "dependencies": {
-    "debug": "^2.4.4",
-    "elasticsearch": "^12.1.3",
-    "lodash": "^4.17.2",
-    "moment": "^2.17.1",
-    "promise": "^7.1.1",
-    "retry": "^0.10.1",
-    "winston": "^2.3.0"
+    "@elastic/elasticsearch": "^7.12.0",
+    "dayjs": "^1.10.4",
+    "debug": "^4.3.1",
+    "lodash.defaults": "^4.2.0",
+    "lodash.omit": "^4.5.0",
+    "promise": "^8.1.0",
+    "retry": "^0.12.0",
+    "winston": "^3.3.3",
+    "winston-transport": "^4.4.0"
   },
   "devDependencies": {
-    "babel-cli": "^6.0.0",
-    "babel-eslint": "^7.1.1",
-    "babel-preset-env": "^1.1.8",
-    "babel-preset-es2015": "^6.0.0",
-    "coveralls": "^2.11.15",
-    "eslint": "^3.12.2",
-    "eslint-config-airbnb-base": "^11.0.0",
-    "eslint-plugin-import": "^2.2.0",
-    "eslint-plugin-json": "^1.2.0",
-    "istanbul": "^0.4.5",
-    "mocha": "^3.2.0",
-    "should": "^11.1.2"
+    "babel-eslint": "^10.1.0",
+    "coveralls": "^3.1.0",
+    "eslint": "^7.23.0",
+    "eslint-config-airbnb-base": "^14.2.1",
+    "eslint-plugin-import": "^2.22.1",
+    "eslint-plugin-json": "^2.1.2",
+    "mocha": "^8.3.2",
+    "nyc": "^15.1.0",
+    "should": "^13.2.3"
   },
   "scripts": {
-    "test": "npm run lint && npm run mocha",
+    "test": "nyc mocha",
     "lint": "eslint *.json *.js",
-    "mocha": "mocha ./test/*",
-    "coveralls": "istanbul cover ./node_modules/mocha/bin/_mocha --report lcovonly -- -R spec ./test/*"
+    "mocha": "mocha --full-trace./test/* -- --trace-warnings",
+    "coveralls": "nyc report --reporter=text-lcov | coveralls"
   },
   "engines": {
-    "node": ">= 6.0.0"
+    "node": ">= 8.0.0"
   }
 }
