@@ -195,7 +195,7 @@ BulkWriter.prototype.checkEsConnection = function checkEsConnection(retryLimit) 
   const operation = retry.operation({
     forever: false,
     retries: retryLimit,
-    factor: 1,
+    factor: 5,
     minTimeout: 1000,
     maxTimeout: 10 * 1000,
     randomize: false
